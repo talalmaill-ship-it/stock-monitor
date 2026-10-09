@@ -1,4 +1,6 @@
 import unittest
+import io
+from urllib.error import HTTPError
 from datetime import datetime
 from unittest.mock import patch
 import monitor as m
@@ -223,6 +225,18 @@ class Tests(unittest.TestCase):
         with patch('monitor.request_json', return_value={'ok': True}) as request:
             m.telegram('test')
             request.assert_called_once()
+
+    def test_telegram_group_migration_retries_replacement_once(self):
+        error = HTTPError('https://api.telegram.org/test', 400, 'Bad Request', {},
+                          io.BytesIO(b'{"parameters":{"migrate_to_chat_id":-100456}}'))
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"ok":true}'
+        with patch('monitor.urlopen', side_effect=[error, response]) as opened, patch('builtins.print'):
+            self.assertTrue(m.request_json('https://api.telegram.org/test', 'POST',
+                            {'chat_id': '-123', 'text': 'test'})['ok'])
+            retry = __import__('json').loads(opened.call_args_list[1].args[0].data)
+            self.assertEqual(retry['chat_id'], '-100456')
+            self.assertEqual(opened.call_count, 2)
 
     def test_reserve_before_send(self):
         state = object.__new__(m.State)

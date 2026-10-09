@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'test = Telegram test; monitor = normal scheduled behavior'
+        description: 'test = Telegram; monitor = alerts; diagnose = data log only'
         type: choice
-        options: [test, monitor]
+        options: [test, monitor, diagnose]
         default: test
   schedule:
     # UTC envelope covers both EST and EDT; Python filters in America/New_York.
@@ -44,8 +44,8 @@ jobs:
           from datetime import datetime
           from monitor import NY, phase, disable
           p = phase(datetime.now(NY))
-          active = os.environ['MODE'] == 'test' or p in ('monitor', 'summary')
-          if p == 'expired' and os.environ['MODE'] != 'test':
+          active = os.environ['MODE'] in ('test', 'diagnose') or p in ('monitor', 'summary')
+          if p == 'expired' and os.environ['MODE'] == 'monitor':
               disable()
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f"active={str(active).lower()}\n")

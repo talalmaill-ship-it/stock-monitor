@@ -131,10 +131,27 @@ def fresh_stamp(stamp, now, summary=False):
     return timedelta(0) <= anchor - stamp <= MAX_AGE
 
 
+def add_quote_snapshot(result, info, now, summary=False):
+    """Use a timestamped quote when chart bars omit extended-hours trades."""
+    for prefix, label in [('regularMarket', 'regular'), ('preMarket', 'pre-market'),
+                          ('postMarket', 'after-hours')]:
+        price = number(info.get(prefix + 'Price'), True)
+        epoch = number(info.get(prefix + 'Time'), True)
+        if price is None or epoch is None:
+            continue
+        stamp = datetime.fromtimestamp(epoch, NY)
+        if not fresh_stamp(stamp, now, summary):
+            continue
+        if result['stamp'] is None or stamp > result['stamp']:
+            result.update(price=price, stamp=stamp, session=label,
+                          source='Yahoo timestamped quote')
+
+
 def fetch(symbol, now, summary=False):
     import yfinance as yf
     result = dict(symbol=symbol, price=None, change=None, volume=None,
-                  bid=None, ask=None, stamp=None, session='n/a')
+                  bid=None, ask=None, stamp=None, session='n/a', source='n/a')
+    prior = None
     ticker = yf.Ticker(symbol)
     try:
         bars = ticker.history(period='5d', interval='5m', prepost=True,
@@ -149,7 +166,13 @@ def fetch(symbol, now, summary=False):
                 stamp = candidates.index[-1].to_pydatetime()
                 if fresh_stamp(stamp, now, summary):
                     result.update(price=number(candidates.iloc[-1]['Close'], True),
-                                  stamp=stamp, session=session(stamp))
+                                  stamp=stamp, session=session(stamp), source='Yahoo 5-minute bar')
+                else:
+                    print(f'{symbol}: rejected old chart price; last bar NY {stamp.isoformat()}')
+            else:
+                print(f'{symbol}: no chart price for current NY date')
+        else:
+            print(f'{symbol}: empty chart response')
     except Exception:
         print(f'{symbol}: intraday data unavailable')
     try:
@@ -158,16 +181,20 @@ def fetch(symbol, now, summary=False):
         if not daily.empty:
             daily = daily.tz_convert('America/New_York')
             previous = daily[daily.index.date < now.date()].dropna(subset=['Close'])
-            if not previous.empty and result['price'] is not None:
+            if not previous.empty:
                 prior = number(previous.iloc[-1]['Close'], True)
                 # Reject a suspiciously old reference instead of inventing a close.
-                if prior and (now.date() - previous.index[-1].date()).days <= 7:
-                    result['change'] = float((Decimal(str(result['price'])) /
-                                              Decimal(str(prior)) - 1) * 100)
+                if (now.date() - previous.index[-1].date()).days > 7:
+                    prior = None
     except Exception:
         print(f'{symbol}: prior close unavailable')
     try:
         info = ticker.get_info()
+        add_quote_snapshot(result, info, now, summary)
+        for prefix in ('regularMarket', 'preMarket', 'postMarket'):
+            ts = number(info.get(prefix + 'Time'), True)
+            if ts:
+                print(f'{symbol}: {prefix} source time NY {datetime.fromtimestamp(ts, NY).isoformat()}')
         epoch = number(info.get('regularMarketTime'), True)
         stamp = datetime.fromtimestamp(epoch, NY) if epoch else None
         if stamp and stamp.date() == now.date():
@@ -184,6 +211,8 @@ def fetch(symbol, now, summary=False):
                     result[field] = raw
     except Exception:
         print(f'{symbol}: volume/bid/ask unavailable')
+    if prior is not None and result['price'] is not None:
+        result['change'] = float((Decimal(str(result['price'])) / Decimal(str(prior)) - 1) * 100)
     return result
 
 
@@ -196,11 +225,19 @@ def row(q):
     return (f"{q['symbol']} | {fmt(q['change'], '+.2f')}% | ${fmt(q['price'], '.4f')}\n"
             f"Volume (regular): {fmt(q['volume'], ',.0f')} | {q['session']}\n"
             f"Bid: {fmt(q['bid'], '.4f')} | Ask: {fmt(q['ask'], '.4f')}\n"
-            f"Quote NY: {stamp}")
+            f"Quote NY: {stamp} | Source: {q.get('source', 'n/a')}")
 
 
 def run(mode, now=None):
     now = now or datetime.now(NY)
+    if mode == 'diagnose':
+        # Read-only verification: never sends Telegram, writes state, or disables a workflow.
+        quotes = [fetch(s, now, phase(now) == 'summary') for s in SYMBOLS]
+        for q in quotes:
+            print(row(q))
+        valid = sum(q['price'] is not None and q['change'] is not None for q in quotes)
+        print(f'Fresh quotes with reference close: {valid}/{len(SYMBOLS)}')
+        return
     if mode == 'test':
         telegram('✅ اختبار الاتصال نجح. مراقب الأسهم جاهز. هذه رسالة تجريبية بلا بيانات أسعار.\n'
                  + now.strftime('NY: %Y-%m-%d %H:%M %Z'))
@@ -223,12 +260,12 @@ def run(mode, now=None):
         print(row(q))
     all_failed = all(q['price'] is None or q['change'] is None for q in quotes)
     if all_failed:
-        state.once(day, 'data-failed', '⚠️ فشل جلب بيانات صالحة للأسهم الخمسة: n/a\n'
+        state.once(day, 'data-failed', '⚠️ لا تتوفر أسعار حديثة صالحة للأسهم الخمسة: n/a. تعذّر فحص الحركة في هذا التشغيل؛ سيحاول مجددًا تلقائيًا.\n'
                    + now.strftime('NY: %Y-%m-%d %H:%M %Z'))
     if status == 'summary':
         text = 'ملخص المراقبة — ' + day + '\n\n' + '\n\n'.join(row(q) for q in quotes)
         text += '\n\nVolume = حجم الجلسة العادية المتاح فقط؛ حجم الساعات الممتدة n/a.'
-        text += '\nالسعر = آخر إغلاق شمعة 5 دقائق متاح؛ ليس سعرًا لحظيًا مضمونًا.'
+        text += '\nالسعر = أحدث قراءة مؤرخة متاحة من Yahoo؛ ليس سعرًا لحظيًا مضمونًا.'
         state.once(day, 'summary', text)
         if now.date() == END:
             disable()
@@ -246,13 +283,13 @@ def run(mode, now=None):
             sent.setdefault(f"{q['symbol']}:{direction}:{lower}", {'covered': True})
         text = 'تنبيه حركة للمراقبة\n' + row(q)
         text += '\n' + now.strftime('Checked NY: %Y-%m-%d %H:%M %Z')
-        text += '\nالسعر: آخر شمعة 5 دقائق متاحة. Volume: الجلسة العادية فقط.'
+        text += '\nالسعر: أحدث قراءة مؤرخة متاحة. Volume: الجلسة العادية فقط.'
         state.once(day, key, text)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=['monitor', 'test'], default='monitor')
+    parser.add_argument('--mode', choices=['monitor', 'test', 'diagnose'], default='monitor')
     args = parser.parse_args()
     try:
         run(args.mode)

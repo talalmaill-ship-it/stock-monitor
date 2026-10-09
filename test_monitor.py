@@ -26,6 +26,10 @@ class MemoryState:
 
 class Tests(unittest.TestCase):
     def setUp(self):
+        # Unit tests must never consume the real API quota supplied by Actions.
+        env = patch.dict('os.environ', {'TWELVE_DATA_API_KEY': '', 'ALPHA_VANTAGE_API_KEY': ''})
+        env.start()
+        self.addCleanup(env.stop)
         MemoryState.data = {'days': {}}
         MemoryState.messages = []
 

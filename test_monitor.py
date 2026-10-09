@@ -27,7 +27,7 @@ class MemoryState:
 class Tests(unittest.TestCase):
     def setUp(self):
         # Unit tests must never consume the real API quota supplied by Actions.
-        env = patch.dict('os.environ', {'TWELVE_DATA_API_KEY': '', 'ALPHA_VANTAGE_API_KEY': ''})
+        env = patch.dict('os.environ', {'TWELVE_DATA_API_KEY': '', 'ALPHA_VANTAGE_API_KEY': '', 'TELEGRAM_GROUP_CHAT_ID': ''})
         env.start()
         self.addCleanup(env.stop)
         MemoryState.data = {'days': {}}
@@ -208,6 +208,21 @@ class Tests(unittest.TestCase):
             for _ in range(9):
                 m.twelve_request('quote', {'symbol': 'MLP'})
             sleep.assert_called_once_with(61)
+
+    @patch.dict('os.environ', {'TELEGRAM_BOT_TOKEN': 'fake-token',
+                               'TELEGRAM_CHAT_ID': '123', 'TELEGRAM_GROUP_CHAT_ID': '-100456'})
+    def test_private_and_group_receive_same_message(self):
+        with patch('monitor.request_json', return_value={'ok': True}) as request:
+            m.telegram('test')
+            self.assertEqual([c.args[2]['chat_id'] for c in request.call_args_list], ['123', '-100456'])
+            self.assertEqual([c.args[2]['text'] for c in request.call_args_list], ['test', 'test'])
+
+    @patch.dict('os.environ', {'TELEGRAM_BOT_TOKEN': 'fake-token',
+                               'TELEGRAM_CHAT_ID': '123', 'TELEGRAM_GROUP_CHAT_ID': ''})
+    def test_private_only_without_group_secret(self):
+        with patch('monitor.request_json', return_value={'ok': True}) as request:
+            m.telegram('test')
+            request.assert_called_once()
 
     def test_reserve_before_send(self):
         state = object.__new__(m.State)

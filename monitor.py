@@ -57,7 +57,7 @@ def thresholds(move):
     return direction, level
 
 
-def request_json(url, method='GET', payload=None, headers=None):
+def request_json(url, method='GET', payload=None, headers=None, allow_migration=True):
     body = None if payload is None else json.dumps(payload).encode()
     request = Request(url, data=body, method=method,
                       headers={'Content-Type': 'application/json', **(headers or {})})
@@ -66,6 +66,18 @@ def request_json(url, method='GET', payload=None, headers=None):
             content = response.read()
             return json.loads(content) if content else {}
     except HTTPError as exc:
+        # Telegram can convert an existing group into a supergroup. The failed
+        # send was not delivered; retry once to Telegram's replacement chat ID.
+        if (allow_migration and exc.code == 400 and request.host == 'api.telegram.org'
+                and isinstance(payload, dict) and 'chat_id' in payload):
+            try:
+                target = json.loads(exc.read()).get('parameters', {}).get('migrate_to_chat_id')
+            except Exception:
+                target = None
+            if isinstance(target, int) and target < 0 and str(target) != str(payload['chat_id']):
+                print('Telegram group upgraded: retrying to the replacement group ID.')
+                return request_json(url, method, {**payload, 'chat_id': str(target)},
+                                    headers, allow_migration=False)
         # Do not print URLs: Telegram's URL contains the secret token.
         raise RuntimeError(f'HTTP {exc.code}') from None
     except (URLError, TimeoutError, OSError):

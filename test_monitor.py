@@ -93,6 +93,46 @@ class Tests(unittest.TestCase):
             disable.assert_called_once()
             fetch.assert_not_called()
 
+    def test_extended_quote_replaces_missing_chart(self):
+        now = at('2026-10-09T19:45')
+        q = dict(price=None, stamp=None)
+        m.add_quote_snapshot(q, {'postMarketPrice': 10.5,
+                             'postMarketTime': at('2026-10-09T19:40').timestamp()}, now)
+        self.assertEqual(q['price'], 10.5)
+        self.assertEqual(q['session'], 'after-hours')
+
+    def test_old_or_untimestamped_snapshot_rejected(self):
+        now = at('2026-10-09T19:45')
+        for info in [{'postMarketPrice': 10.5},
+                     {'postMarketPrice': 10.5, 'postMarketTime': at('2026-10-09T16:00').timestamp()},
+                     {'postMarketPrice': 10.5, 'postMarketTime': at('2026-10-08T19:40').timestamp()}]:
+            q = dict(price=None, stamp=None)
+            m.add_quote_snapshot(q, info, now)
+            self.assertIsNone(q['price'])
+
+    def test_newer_chart_is_not_overwritten(self):
+        now = at('2026-10-09T19:45')
+        q = dict(price=11, stamp=at('2026-10-09T19:40'))
+        m.add_quote_snapshot(q, {'postMarketPrice': 10.5,
+                             'postMarketTime': at('2026-10-09T19:35').timestamp()}, now)
+        self.assertEqual(q['price'], 11)
+
+    def test_premarket_snapshot(self):
+        now = at('2026-10-09T08:00')
+        q = dict(price=None, stamp=None)
+        m.add_quote_snapshot(q, {'preMarketPrice': 10.5,
+                             'preMarketTime': at('2026-10-09T07:55').timestamp()}, now)
+        self.assertEqual(q['session'], 'pre-market')
+
+    def test_diagnose_has_no_external_side_effects(self):
+        self.move = 10
+        with patch('monitor.fetch', side_effect=self.quote), patch('monitor.State') as state, \
+             patch('monitor.telegram') as tg, patch('monitor.disable') as disable, patch('builtins.print'):
+            m.run('diagnose', at('2026-10-09T19:00'))
+            state.assert_not_called()
+            tg.assert_not_called()
+            disable.assert_not_called()
+
     def test_reserve_before_send(self):
         state = object.__new__(m.State)
         state.data = {'days': {}}

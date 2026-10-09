@@ -74,13 +74,19 @@ def request_json(url, method='GET', payload=None, headers=None):
 
 def telegram(text):
     token = os.environ.get('TELEGRAM_BOT_TOKEN', '').strip()
-    chat = os.environ.get('TELEGRAM_CHAT_ID', '').strip()
-    if not token or not chat:
+    private = os.environ.get('TELEGRAM_CHAT_ID', '').strip()
+    group = os.environ.get('TELEGRAM_GROUP_CHAT_ID', '').strip()
+    if not token or not private:
         raise RuntimeError('Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID secret')
-    result = request_json(f'https://api.telegram.org/bot{token}/sendMessage', 'POST',
-                          {'chat_id': chat, 'text': text, 'disable_web_page_preview': True})
-    if not result.get('ok'):
-        raise RuntimeError('Telegram rejected message')
+    chats = list(dict.fromkeys(c for c in (private, group) if c))
+    if any(not c.lstrip('-').isdigit() for c in chats):
+        raise RuntimeError('Telegram chat IDs must be numeric')
+    for chat in chats:
+        result = request_json(f'https://api.telegram.org/bot{token}/sendMessage', 'POST',
+                              {'chat_id': chat, 'text': text, 'disable_web_page_preview': True})
+        if not result.get('ok'):
+            raise RuntimeError('Telegram rejected message')
+
 
 
 class State:

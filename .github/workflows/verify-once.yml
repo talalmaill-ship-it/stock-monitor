@@ -28,7 +28,7 @@ jobs:
           from urllib.request import Request, urlopen
           from urllib.error import HTTPError
           from datetime import datetime
-          from monitor import NY
+          from monitor import NY, request_json
           token = os.environ.get('TELEGRAM_BOT_TOKEN', '').strip()
           if not token:
               raise SystemExit('Missing Telegram bot token.')
@@ -49,8 +49,11 @@ jobs:
                                 data=json.dumps(payload).encode(),
                                 headers={'Content-Type': 'application/json'})
                   try:
-                      with urlopen(req, timeout=20) as response:
-                          result = json.load(response)
+                      if method == 'sendMessage':
+                          result = request_json(req.full_url, 'POST', payload)
+                      else:
+                          with urlopen(req, timeout=20) as response:
+                              result = json.load(response)
                       if not result.get('ok'):
                           raise ValueError('Rejected')
                       print(label + ': ' + method + ' accepted by Telegram.')

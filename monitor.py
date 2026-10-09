@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sys
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from zoneinfo import ZoneInfo
@@ -147,7 +148,7 @@ def add_quote_snapshot(result, info, now, summary=False):
                           source='Yahoo timestamped quote')
 
 
-def fetch(symbol, now, summary=False):
+def fetch_yahoo(symbol, now, summary=False):
     import yfinance as yf
     result = dict(symbol=symbol, price=None, change=None, volume=None,
                   bid=None, ask=None, stamp=None, session='n/a', source='n/a')
@@ -216,6 +217,62 @@ def fetch(symbol, now, summary=False):
     return result
 
 
+def empty_quote(symbol):
+    return dict(symbol=symbol, price=None, change=None, volume=None,
+                bid=None, ask=None, stamp=None, session='n/a', source='n/a')
+
+
+def fetch_twelve(symbol, now, summary=False, probe=False):
+    """Free-plan regular-session quote; never mix prices across providers."""
+    result = empty_quote(symbol)
+    key = os.environ.get('TWELVE_DATA_API_KEY', '').strip()
+    if not key or (not probe and (summary or session(now) != 'regular')):
+        return result
+    try:
+        params = urlencode({'symbol': symbol, 'country': 'United States',
+                            'prepost': 'false', 'apikey': key})
+        data = request_json('https://api.twelvedata.com/quote?' + params)
+        if not isinstance(data, dict) or data.get('status') == 'error':
+            # Provider error messages can contain credentials: print only a numeric code.
+            code = number(data.get('code')) if isinstance(data, dict) else None
+            print(f'{symbol}: Twelve Data rejected request (code {fmt(code, ".0f")})')
+            return result
+        if data.get('symbol') != symbol or data.get('currency') != 'USD':
+            print(f'{symbol}: Twelve Data symbol/currency mismatch')
+            return result
+        epoch = number(data.get('timestamp'), True)
+        if epoch is None:
+            print(f'{symbol}: Twelve Data missing quote timestamp')
+            return result
+        stamp = datetime.fromtimestamp(epoch, NY)
+        print(f'{symbol}: Twelve Data source time NY {stamp.isoformat()}')
+        # A free quote must not turn yesterday's close into a live-session alert.
+        if not fresh_stamp(stamp, now, summary) or session(stamp) != 'regular':
+            print(f'{symbol}: Twelve Data quote is not a fresh regular-session price')
+            return result
+        price = number(data.get('close'), True)
+        prior = number(data.get('previous_close'), True)
+        if price is None or prior is None:
+            print(f'{symbol}: Twelve Data missing price or prior close')
+            return result
+        volume = number(data.get('volume'))
+        result.update(price=price,
+                      change=float((Decimal(str(price)) / Decimal(str(prior)) - 1) * 100),
+                      volume=volume if volume is not None and volume >= 0 else None,
+                      stamp=stamp, session='regular', source='Twelve Data quote')
+    except Exception:
+        print(f'{symbol}: Twelve Data unavailable; trying fallback')
+    return result
+
+
+def fetch(symbol, now, summary=False):
+    result = fetch_twelve(symbol, now, summary)
+    if result['price'] is not None and result['change'] is not None:
+        return result
+    print(f'{symbol}: trying Yahoo fallback')
+    return fetch_yahoo(symbol, now, summary)
+
+
 def fmt(value, spec='.2f'):
     return 'n/a' if value is None else format(value, spec)
 
@@ -232,6 +289,12 @@ def run(mode, now=None):
     now = now or datetime.now(NY)
     if mode == 'diagnose':
         # Read-only verification: never sends Telegram, writes state, or disables a workflow.
+        if session(now) != 'regular':
+            # One request per symbol to verify the added key, even outside the session.
+            # Old quotes remain rejected and are never used for alerts.
+            for symbol in SYMBOLS:
+                fetch_twelve(symbol, now, phase(now) == 'summary', probe=True)
+        print('Alpha Vantage free: intraday alerts unavailable; no requests made.')
         quotes = [fetch(s, now, phase(now) == 'summary') for s in SYMBOLS]
         for q in quotes:
             print(row(q))
@@ -265,7 +328,7 @@ def run(mode, now=None):
     if status == 'summary':
         text = 'ملخص المراقبة — ' + day + '\n\n' + '\n\n'.join(row(q) for q in quotes)
         text += '\n\nVolume = حجم الجلسة العادية المتاح فقط؛ حجم الساعات الممتدة n/a.'
-        text += '\nالسعر = أحدث قراءة مؤرخة متاحة من Yahoo؛ ليس سعرًا لحظيًا مضمونًا.'
+        text += '\nالسعر = أحدث قراءة مؤرخة متاحة من المصدر المبين؛ ليس سعرًا لحظيًا مضمونًا.'
         state.once(day, 'summary', text)
         if now.date() == END:
             disable()

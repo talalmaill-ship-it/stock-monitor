@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sys
+import time as clock
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -16,6 +17,7 @@ NY = ZoneInfo('America/New_York')
 SYMBOLS = ['MLP', 'RCMT', 'IHT', 'AWX', 'ANGH']
 END = date(2026, 10, 16)
 MAX_AGE = timedelta(minutes=30)
+TWELVE_CALLS = []
 
 
 def session(at):
@@ -222,6 +224,19 @@ def empty_quote(symbol):
                 bid=None, ask=None, stamp=None, session='n/a', source='n/a')
 
 
+def twelve_request(endpoint, params):
+    # Basic allows eight credits/minute. Quote + time_series cost two per stock.
+    # All calls are sequential; pause before the ninth call within this process.
+    now = clock.monotonic()
+    TWELVE_CALLS[:] = [t for t in TWELVE_CALLS if now - t < 61]
+    if len(TWELVE_CALLS) >= 8:
+        clock.sleep(max(0, 61 - (now - TWELVE_CALLS[0])))
+        now = clock.monotonic()
+        TWELVE_CALLS[:] = [t for t in TWELVE_CALLS if now - t < 61]
+    TWELVE_CALLS.append(now)
+    return request_json('https://api.twelvedata.com/' + endpoint + '?' + urlencode(params))
+
+
 def fetch_twelve(symbol, now, summary=False, probe=False):
     """Free-plan regular-session quote; never mix prices across providers."""
     result = empty_quote(symbol)
@@ -229,9 +244,9 @@ def fetch_twelve(symbol, now, summary=False, probe=False):
     if not key or (not probe and (summary or session(now) != 'regular')):
         return result
     try:
-        params = urlencode({'symbol': symbol, 'country': 'United States',
-                            'prepost': 'false', 'apikey': key})
-        data = request_json('https://api.twelvedata.com/quote?' + params)
+        params = {'symbol': symbol, 'country': 'United States',
+                  'prepost': 'false', 'apikey': key}
+        data = twelve_request('quote', {**params, 'interval': '1day'})
         if not isinstance(data, dict) or data.get('status') == 'error':
             # Provider error messages can contain credentials: print only a numeric code.
             code = number(data.get('code')) if isinstance(data, dict) else None
@@ -244,22 +259,41 @@ def fetch_twelve(symbol, now, summary=False, probe=False):
         if epoch is None:
             print(f'{symbol}: Twelve Data missing quote timestamp')
             return result
-        stamp = datetime.fromtimestamp(epoch, NY)
-        print(f'{symbol}: Twelve Data source time NY {stamp.isoformat()}')
-        # A free quote must not turn yesterday's close into a live-session alert.
+        reference_day = datetime.fromtimestamp(epoch, NY)
+        print(f'{symbol}: Twelve Data daily reference NY {reference_day.isoformat()}')
+        # Daily quote timestamp identifies the daily period, NOT the last trade.
+        # Use only its prior daily close and volume, then fetch a timestamped intraday bar.
+        if reference_day.date() != now.date() or reference_day > now:
+            print(f'{symbol}: Twelve Data daily reference is not for today')
+            return result
+        prior = number(data.get('previous_close'), True)
+        if prior is None:
+            print(f'{symbol}: Twelve Data missing prior daily close')
+            return result
+        intraday = twelve_request('time_series', {**params, 'interval': '5min',
+                                   'outputsize': 1, 'timezone': 'America/New_York',
+                                   'adjust': 'none'})
+        meta = intraday.get('meta', {})
+        values = intraday.get('values', [])
+        if (meta.get('symbol') != symbol or meta.get('currency') != 'USD'
+                or not values):
+            print(f'{symbol}: Twelve Data intraday bars unavailable')
+            return result
+        latest = values[0]
+        stamp = datetime.fromisoformat(latest['datetime']).replace(tzinfo=NY)
+        print(f'{symbol}: Twelve Data 5-minute bar NY {stamp.isoformat()}')
         if not fresh_stamp(stamp, now, summary) or session(stamp) != 'regular':
             print(f'{symbol}: Twelve Data quote is not a fresh regular-session price')
             return result
-        price = number(data.get('close'), True)
-        prior = number(data.get('previous_close'), True)
-        if price is None or prior is None:
-            print(f'{symbol}: Twelve Data missing price or prior close')
+        price = number(latest.get('close'), True)
+        if price is None:
+            print(f'{symbol}: Twelve Data missing intraday price')
             return result
         volume = number(data.get('volume'))
         result.update(price=price,
                       change=float((Decimal(str(price)) / Decimal(str(prior)) - 1) * 100),
                       volume=volume if volume is not None and volume >= 0 else None,
-                      stamp=stamp, session='regular', source='Twelve Data quote')
+                      stamp=stamp, session='regular', source='Twelve Data 5-minute bar')
     except Exception:
         print(f'{symbol}: Twelve Data unavailable; trying fallback')
     return result
@@ -290,7 +324,7 @@ def run(mode, now=None):
     if mode == 'diagnose':
         # Read-only verification: never sends Telegram, writes state, or disables a workflow.
         if session(now) != 'regular':
-            # One request per symbol to verify the added key, even outside the session.
+            # Probe the added key outside the session; API calls are rate limited.
             # Old quotes remain rejected and are never used for alerts.
             for symbol in SYMBOLS:
                 fetch_twelve(symbol, now, phase(now) == 'summary', probe=True)

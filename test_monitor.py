@@ -133,6 +133,55 @@ class Tests(unittest.TestCase):
             tg.assert_not_called()
             disable.assert_not_called()
 
+    @patch.dict('os.environ', {'TWELVE_DATA_API_KEY': 'fake-test-key'})
+    def test_twelve_success_uses_own_reference_and_skips_yahoo(self):
+        now = at('2026-10-09T10:00')
+        data = dict(symbol='MLP', currency='USD', close='10.5', previous_close='10',
+                    timestamp=at('2026-10-09T09:59').timestamp(), volume='1234')
+        with patch('monitor.request_json', return_value=data) as req, \
+             patch('monitor.fetch_yahoo') as yahoo, patch('builtins.print'):
+            q = m.fetch('MLP', now)
+        self.assertEqual(q['change'], 5)
+        self.assertEqual(q['volume'], 1234)
+        self.assertIsNone(q['bid'])
+        self.assertEqual(q['source'], 'Twelve Data quote')
+        req.assert_called_once()
+        yahoo.assert_not_called()
+
+    @patch.dict('os.environ', {'TWELVE_DATA_API_KEY': 'fake-test-key'})
+    def test_twelve_bad_quotes_fall_back(self):
+        now = at('2026-10-09T10:00')
+        good = dict(symbol='MLP', currency='USD', close='10.5', previous_close='10',
+                    timestamp=at('2026-10-09T09:59').timestamp())
+        bad = [{'status': 'error', 'code': 429},
+               {**good, 'timestamp': at('2026-10-08T15:59').timestamp()},
+               {**good, 'timestamp': at('2026-10-09T10:01').timestamp()},
+               {**good, 'previous_close': None}, {**good, 'symbol': 'OTHER'},
+               {**good, 'currency': 'EUR'}, {**good, 'close': 'nan'}]
+        for response in bad:
+            with self.subTest(response=response), \
+                 patch('monitor.request_json', return_value=response), \
+                 patch('monitor.fetch_yahoo', return_value={'fallback': True}) as yahoo, \
+                 patch('builtins.print'):
+                self.assertEqual(m.fetch('MLP', now), {'fallback': True})
+                yahoo.assert_called_once()
+
+    @patch.dict('os.environ', {'TWELVE_DATA_API_KEY': 'fake-test-key'})
+    def test_free_twelve_no_requests_extended_or_summary(self):
+        with patch('monitor.request_json') as req:
+            for clock, summary in [('08:00', False), ('19:00', False), ('20:05', True)]:
+                q = m.fetch_twelve('MLP', at('2026-10-09T' + clock), summary)
+                self.assertIsNone(q['price'])
+            req.assert_not_called()
+
+    @patch.dict('os.environ', {'TWELVE_DATA_API_KEY': '',
+                               'ALPHA_VANTAGE_API_KEY': 'fake-free-key'})
+    def test_free_alpha_key_does_not_trigger_requests(self):
+        with patch('monitor.request_json') as req, \
+             patch('monitor.fetch_yahoo', return_value={'fallback': True}), patch('builtins.print'):
+            m.fetch('MLP', at('2026-10-09T10:00'))
+            req.assert_not_called()
+
     def test_reserve_before_send(self):
         state = object.__new__(m.State)
         state.data = {'days': {}}
